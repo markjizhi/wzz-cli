@@ -58,6 +58,36 @@ switch (command) {
             ensureLoggedIn(function() { cmdPublish(file, dryRun, categoryArg, columnArg); });
         }
         break;
+    case 'edit':
+        var editFile = args[1] || '';
+        var editId = getArgValue(args, '--id');
+        var editCategoryArg = getArgValue(args, '--category');
+        var editColumnArg = getArgValue(args, '--column');
+        if (!editFile) {
+            console.log('错误：请指定Markdown文件路径');
+            console.log('用法：wzz edit article.md --id <文章ID>');
+            process.exit(1);
+        }
+        ensureLoggedIn(function() { cmdEdit(editFile, editId, editCategoryArg, editColumnArg); });
+        break;
+    case 'column':
+        var columnId = args[1] || '';
+        if (!columnId) {
+            console.log('错误：请指定专栏ID');
+            console.log('用法：wzz column <专栏ID>');
+            process.exit(1);
+        }
+        ensureLoggedIn(function() { cmdColumnArticles(columnId); });
+        break;
+    case 'article':
+        var artId = args[1] || '';
+        if (!artId) {
+            console.log('错误：请指定文章ID');
+            console.log('用法：wzz article <文章ID>');
+            process.exit(1);
+        }
+        ensureLoggedIn(function() { cmdArticleDetail(artId); });
+        break;
     case 'help':
     default:
         cmdHelp();
@@ -86,6 +116,10 @@ function cmdHelp() {
     console.log('  wzz publish <file>                         发布文章（交互式选择分类/专栏）');
     console.log('  wzz publish <file> --category <id> --column <id>   指定分类和专栏发布');
     console.log('  wzz publish <file> --dry-run               预览模式，不实际发布');
+    console.log('  wzz edit <file> --id <文章ID>              修改已发布的文章（全量替换）');
+    console.log('  wzz edit <file> --id <ID> --category <id> --column <id>   指定分类和专栏修改');
+    console.log('  wzz column <专栏ID>                        查看专栏下的文章列表');
+    console.log('  wzz article <文章ID>                       查看文章详情');
     console.log('  wzz logout                                 退出登录');
     console.log('  wzz help                                   显示帮助\n');
     console.log('AI助手调用说明：');
@@ -93,12 +127,15 @@ function cmdHelp() {
     console.log('  2. 执行 wzz list 获取分类ID和专栏ID');
     console.log('  3. 使用 --category 和 --column 参数非交互式发布：');
     console.log('     wzz publish "/path/to/article.md" --category <分类ID> --column <专栏ID>');
-    console.log('  4. 路径包含空格时必须用引号包裹');
-    console.log('  5. 建议先 --dry-run 预览确认再正式发布\n');
+    console.log('  4. 修改文章：');
+    console.log('     wzz edit "/path/to/article.md" --id <文章ID> --category <分类ID> --column <专栏ID>');
+    console.log('  5. 路径包含空格时必须用引号包裹');
+    console.log('  6. 建议先 --dry-run 预览确认再正式发布\n');
     console.log('Markdown文件格式：');
-    console.log('  支持frontmatter（title, category, column, pay_money, status, author, thumb）');
+    console.log('  支持frontmatter（title, category, column, pay_money, status, author, thumb, article_id）');
     console.log('  正文中的图片 ![](path) 会自动上传，第一张图自动作为缩略图');
-    console.log('  没有frontmatter时自动从正文#标题提取文章标题\n');
+    console.log('  没有frontmatter时自动从正文#标题提取文章标题');
+    console.log('  编辑时可在frontmatter中写 article_id 代替 --id 参数\n');
 }
 
 function doLogin(callback) {
@@ -609,6 +646,255 @@ function doPublishUpload(title, category, column, payMoney, status, author, thum
     }
 
     processNextUpload();
+}
+
+function cmdEdit(file, articleId, categoryArg, columnArg) {
+    var filePath = path.resolve(file);
+    if (!fs.existsSync(filePath)) {
+        console.log('错误：文件不存在 - ' + file);
+        process.exit(1);
+    }
+
+    var content = fs.readFileSync(filePath, 'utf8');
+    var baseDir = path.dirname(filePath);
+
+    // 解析frontmatter
+    var parsed = parseFrontmatter(content);
+    var meta = parsed.meta;
+    var body = parsed.body;
+
+    // 文章ID：命令行参数 > frontmatter
+    var id = articleId ? parseInt(articleId) : (meta.article_id ? parseInt(meta.article_id) : 0);
+    if (!id) {
+        console.log('错误：请指定文章ID');
+        console.log('用法：wzz edit article.md --id <文章ID>');
+        console.log('  或在frontmatter中添加 article_id: <ID>');
+        process.exit(1);
+    }
+
+    var title = meta.title || '';
+    var payMoney = meta.pay_money || config.defaults.pay_money;
+    var status = meta.status !== undefined ? parseInt(meta.status) : config.defaults.status;
+    var author = meta.author || config.defaults.author || '';
+    var thumb = meta.thumb || '';
+    var category = categoryArg ? parseInt(categoryArg) : (meta.category ? parseInt(meta.category) : 0);
+    var column = columnArg ? parseInt(columnArg) : (meta.column ? parseInt(meta.column) : 0);
+
+    // 推断标题
+    if (!title) {
+        var headingRemoved = true;
+        while (headingRemoved) {
+            var titleMatch = body.match(/^\s*#+\s+(.+)$/m);
+            if (titleMatch && body.indexOf(titleMatch[0]) === body.search(/\S/)) {
+                title = titleMatch[1].trim();
+                body = body.substring(body.indexOf(titleMatch[0]) + titleMatch[0].length).replace(/^\s*\n/, '');
+            } else {
+                headingRemoved = false;
+            }
+        }
+        body = body.trim();
+        if (!title) {
+            title = path.basename(filePath, path.extname(filePath));
+        }
+    } else {
+        var removing = true;
+        while (removing) {
+            var hMatch = body.match(/^\s*#+\s+(.+)$/m);
+            if (hMatch && body.indexOf(hMatch[0]) === body.search(/\S/)) {
+                body = body.substring(body.indexOf(hMatch[0]) + hMatch[0].length).replace(/^\s*\n/, '');
+            } else {
+                removing = false;
+            }
+        }
+        body = body.trim();
+    }
+
+    if (!category) {
+        console.log('错误：分类不能为空，请通过 --category 指定或在frontmatter中设置');
+        process.exit(1);
+    }
+
+    var segments = parseBody(body);
+
+    console.log('准备更新文章 #' + id + '：' + title);
+    console.log('  分类ID: ' + category);
+    console.log('  专栏ID: ' + column);
+    console.log('  价格: ' + payMoney);
+    console.log('  状态: ' + (status == 1 ? '上架' : '下架'));
+    console.log('  内容段数: ' + segments.length + '\n');
+
+    console.log('开始上传图片...');
+
+    // 收集图片上传任务
+    var uploadTasks = [];
+    if (thumb) {
+        var thumbPath = resolvePath(thumb, baseDir);
+        if (fs.existsSync(thumbPath)) {
+            uploadTasks.push({ type: 'thumb', path: thumbPath });
+        } else {
+            // thumb可能是已上传的远程路径，保留
+        }
+    }
+
+    segments.forEach(function(seg, i) {
+        if (seg.type === 'image') {
+            var imgPath = resolvePath(seg.path, baseDir);
+            if (fs.existsSync(imgPath)) {
+                uploadTasks.push({ type: 'image', index: i, path: imgPath });
+            } else {
+                console.log('  警告：图片不存在 - ' + imgPath + '，跳过');
+            }
+        }
+    });
+
+    var thumbUrl = '';
+    var firstImageUrl = '';
+    var uploadIndex = 0;
+
+    // 如果thumb不是本地文件，可能已经是远程路径
+    if (thumb && !fs.existsSync(resolvePath(thumb, baseDir))) {
+        thumbUrl = thumb;
+    }
+
+    function processNextUpload() {
+        if (uploadIndex >= uploadTasks.length) {
+            doUpdate();
+            return;
+        }
+
+        var task = uploadTasks[uploadIndex];
+        uploadImage(task.path, function(err, imgUrl) {
+            if (err || !imgUrl) {
+                console.log('  警告：图片上传失败 - ' + path.basename(task.path));
+            } else {
+                console.log('  上传成功: ' + path.basename(task.path) + ' -> ' + imgUrl);
+                if (task.type === 'thumb') {
+                    thumbUrl = imgUrl;
+                } else {
+                    segments[task.index].url = imgUrl;
+                    if (!firstImageUrl) {
+                        firstImageUrl = imgUrl;
+                    }
+                }
+            }
+            uploadIndex++;
+            processNextUpload();
+        });
+    }
+
+    function doUpdate() {
+        if (!thumbUrl && firstImageUrl) {
+            thumbUrl = firstImageUrl;
+            console.log('  自动使用第一张图片作为缩略图');
+        }
+
+        var items = [];
+        segments.forEach(function(seg) {
+            if (seg.type === 'text') {
+                items.push(buildRichtextItem(seg.content));
+            } else if (seg.url) {
+                items.push(buildPictureItem(seg.url));
+            }
+        });
+
+        var contentJson = JSON.stringify({ items: items });
+
+        console.log('\n正在更新...');
+        var updateData = {
+            article_id: id,
+            title: title,
+            category: category,
+            column: column,
+            types: config.defaults.types,
+            pay_money: payMoney,
+            content: contentJson,
+            thumb: thumbUrl,
+            author: author,
+            status: status
+        };
+
+        apiRequest('cli_update', updateData, function(err, result) {
+            if (err) {
+                console.log('\n更新失败：' + err);
+                process.exit(1);
+            }
+            if (result.errno === 0) {
+                console.log('\n更新成功！文章ID: ' + result.data.article_id);
+                console.log('\n完成！');
+            } else {
+                console.log('\n更新失败：' + result.message);
+                process.exit(1);
+            }
+        });
+    }
+
+    processNextUpload();
+}
+
+function cmdColumnArticles(columnId) {
+    console.log('正在查询专栏 #' + columnId + ' 的文章列表...\n');
+
+    apiRequest('cli_column_articles&column_id=' + columnId, null, function(err, result) {
+        if (err || !result || result.errno !== 0) {
+            console.log('查询失败：' + (result ? result.message : err));
+            process.exit(1);
+        }
+
+        var data = result.data;
+        console.log('专栏：' + data.column_name + ' (ID: ' + data.column_id + ')');
+        console.log('文章数：' + data.count + '\n');
+
+        if (data.count === 0) {
+            console.log('该专栏下暂无文章');
+            return;
+        }
+
+        console.log(padStr('ID', 8) + padStr('标题', 40) + padStr('状态', 8) + '更新时间');
+        console.log(repeat('-', 70));
+        data.articles.forEach(function(article) {
+            var statusText = article.status == 2 ? '显示' : '隐藏';
+            var updateTime = formatTime(article.updatetime);
+            console.log(padStr(article.id, 8) + padStr(article.title, 40) + padStr(statusText, 8) + updateTime);
+        });
+        console.log('');
+    });
+}
+
+function cmdArticleDetail(articleId) {
+    console.log('正在查询文章 #' + articleId + ' ...\n');
+
+    apiRequest('cli_article_detail&article_id=' + articleId, null, function(err, result) {
+        if (err || !result || result.errno !== 0) {
+            console.log('查询失败：' + (result ? result.message : err));
+            process.exit(1);
+        }
+
+        var d = result.data;
+        console.log('== 文章详情 ==');
+        console.log('  ID:       ' + d.id);
+        console.log('  标题:     ' + d.title);
+        console.log('  分类:     ' + d.category_name + ' (ID: ' + d.category + ')');
+        console.log('  专栏:     ' + (d.column_id ? d.column_name + ' (ID: ' + d.column_id + ')' : '无'));
+        console.log('  类型:     ' + (['', '图文', '图', '音频', '视频'][d.types] || d.types));
+        console.log('  价格:     ' + d.pay_money);
+        console.log('  状态:     ' + (d.status == 2 ? '显示' : '隐藏'));
+        console.log('  缩略图:   ' + (d.thumb || '无'));
+        console.log('  作者:     ' + (d.author || '无'));
+        console.log('  内容组件: ' + d.content_items + ' 个');
+        console.log('  创建时间: ' + formatTime(d.createtime));
+        console.log('  更新时间: ' + formatTime(d.updatetime));
+        console.log('');
+    });
+}
+
+function formatTime(ts) {
+    var d = new Date(parseInt(ts) * 1000);
+    var y = d.getFullYear();
+    var m = ('0' + (d.getMonth() + 1)).slice(-2);
+    var day = ('0' + d.getDate()).slice(-2);
+    var h = ('0' + d.getHours()).slice(-2);
+    var min = ('0' + d.getMinutes()).slice(-2);
+    return y + '-' + m + '-' + day + ' ' + h + ':' + min;
 }
 
 // ============================================================
