@@ -1,0 +1,16 @@
+{
+  "name": "wzz-cli",
+  "version": "1.0.0",
+  "description": "文转赚CLI发布工具 - 通过命令行发布文章到文转赚系统",
+  "main": "index.js",
+  "bin": {
+    "wzz": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {},
+  "engines": {
+    "node": ">=12.0.0"
+  }
+}

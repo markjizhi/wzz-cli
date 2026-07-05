@@ -1,0 +1,9 @@
+{
+  "site_url": "http://wx.wenzhuanzhuan.com",
+  "defaults": {
+    "types": 1,
+    "status": 1,
+    "pay_money": 0,
+    "author": ""
+  }
+}
