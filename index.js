@@ -83,10 +83,11 @@ switch (command) {
         var artId = args[1] || '';
         if (!artId) {
             console.log('错误：请指定文章ID');
-            console.log('用法：wzz article <文章ID>');
+            console.log('用法：wzz article <文章ID> [--md]');
             process.exit(1);
         }
-        ensureLoggedIn(function() { cmdArticleDetail(artId); });
+        var exportMd = args.indexOf('--md') > -1;
+        ensureLoggedIn(function() { cmdArticleDetail(artId, exportMd); });
         break;
     case 'help':
     default:
@@ -120,6 +121,7 @@ function cmdHelp() {
     console.log('  wzz edit <file> --id <ID> --category <id> --column <id>   指定分类和专栏修改');
     console.log('  wzz column <专栏ID>                        查看专栏下的文章列表');
     console.log('  wzz article <文章ID>                       查看文章详情');
+    console.log('  wzz article <文章ID> --md                  导出文章为Markdown文件');
     console.log('  wzz logout                                 退出登录');
     console.log('  wzz help                                   显示帮助\n');
     console.log('AI助手调用说明：');
@@ -551,11 +553,16 @@ function doPublishUpload(title, category, column, payMoney, status, author, thum
 
     segments.forEach(function(seg, i) {
         if (seg.type === 'image') {
-            var imgPath = resolvePath(seg.path, baseDir);
-            if (fs.existsSync(imgPath)) {
-                uploadTasks.push({ type: 'image', index: i, path: imgPath });
+            // 远程URL直接使用，不需要上传
+            if (seg.path && seg.path.match(/^https?:\/\//)) {
+                seg.url = seg.path;
             } else {
-                console.log('  警告：图片不存在 - ' + imgPath + '，跳过');
+                var imgPath = resolvePath(seg.path, baseDir);
+                if (fs.existsSync(imgPath)) {
+                    uploadTasks.push({ type: 'image', index: i, path: imgPath });
+                } else {
+                    console.log('  警告：图片不存在 - ' + imgPath + '，跳过');
+                }
             }
         }
     });
@@ -604,8 +611,10 @@ function doPublishUpload(title, category, column, payMoney, status, author, thum
         segments.forEach(function(seg) {
             if (seg.type === 'text') {
                 items.push(buildRichtextItem(seg.content));
-            } else if (seg.url) {
+            } else if (seg.type === 'image' && seg.url) {
                 items.push(buildPictureItem(seg.url));
+            } else if (seg.type === 'video' && seg.url) {
+                items.push(buildVideoItem(seg.url));
             }
         });
 
@@ -738,11 +747,16 @@ function cmdEdit(file, articleId, categoryArg, columnArg) {
 
     segments.forEach(function(seg, i) {
         if (seg.type === 'image') {
-            var imgPath = resolvePath(seg.path, baseDir);
-            if (fs.existsSync(imgPath)) {
-                uploadTasks.push({ type: 'image', index: i, path: imgPath });
+            // 远程URL直接使用，不需要上传
+            if (seg.path && seg.path.match(/^https?:\/\//)) {
+                seg.url = seg.path;
             } else {
-                console.log('  警告：图片不存在 - ' + imgPath + '，跳过');
+                var imgPath = resolvePath(seg.path, baseDir);
+                if (fs.existsSync(imgPath)) {
+                    uploadTasks.push({ type: 'image', index: i, path: imgPath });
+                } else {
+                    console.log('  警告：图片不存在 - ' + imgPath + '，跳过');
+                }
             }
         }
     });
@@ -792,8 +806,10 @@ function cmdEdit(file, articleId, categoryArg, columnArg) {
         segments.forEach(function(seg) {
             if (seg.type === 'text') {
                 items.push(buildRichtextItem(seg.content));
-            } else if (seg.url) {
+            } else if (seg.type === 'image' && seg.url) {
                 items.push(buildPictureItem(seg.url));
+            } else if (seg.type === 'video' && seg.url) {
+                items.push(buildVideoItem(seg.url));
             }
         });
 
@@ -860,7 +876,7 @@ function cmdColumnArticles(columnId) {
     });
 }
 
-function cmdArticleDetail(articleId) {
+function cmdArticleDetail(articleId, exportMd) {
     console.log('正在查询文章 #' + articleId + ' ...\n');
 
     apiRequest('cli_article_detail&article_id=' + articleId, null, function(err, result) {
@@ -884,7 +900,159 @@ function cmdArticleDetail(articleId) {
         console.log('  创建时间: ' + formatTime(d.createtime));
         console.log('  更新时间: ' + formatTime(d.updatetime));
         console.log('');
+
+        if (exportMd && d.content) {
+            var md = generateArticleMarkdown(d);
+            var filename = 'article_' + d.id + '.md';
+            fs.writeFileSync(filename, md, 'utf8');
+            console.log('已导出到: ' + path.resolve(filename));
+        }
     });
+}
+
+// 将文章数据转为完整的 Markdown 文件内容
+function generateArticleMarkdown(data) {
+    var lines = [];
+    // frontmatter
+    lines.push('---');
+    lines.push('title: "' + (data.title || '').replace(/"/g, '\\"') + '"');
+    lines.push('article_id: ' + data.id);
+    lines.push('category: ' + data.category);
+    if (data.column_id) lines.push('column: ' + data.column_id);
+    if (data.pay_money && data.pay_money !== '0.00') lines.push('pay_money: ' + data.pay_money);
+    if (data.author) lines.push('author: "' + data.author.replace(/"/g, '\\"') + '"');
+    if (data.thumb) lines.push('thumb: "' + data.thumb + '"');
+    lines.push('status: ' + data.status);
+    lines.push('---');
+    lines.push('');
+
+    // 正文内容
+    if (data.content && typeof data.content === 'object') {
+        var keys = Object.keys(data.content);
+        keys.forEach(function(key) {
+            var component = data.content[key];
+            var block = convertComponent(component);
+            if (block) {
+                lines.push(block);
+                lines.push('');
+            }
+        });
+    }
+
+    return lines.join('\n');
+}
+
+// 将单个组件转为 Markdown
+function convertComponent(component) {
+    var id = component.id;
+    switch (id) {
+        case 'richtext':
+            return convertRichtext(component);
+        case 'picture':
+            return convertPicture(component);
+        case 'video':
+            return convertVideo(component);
+        case 'goods':
+            return convertGoods(component);
+        default:
+            return '> [' + id + ' 组件]';
+    }
+}
+
+function convertRichtext(component) {
+    var raw = component.params && component.params.content;
+    if (!raw) return '';
+    var html = Buffer.from(raw, 'base64').toString('utf8');
+    return htmlToMarkdown(html);
+}
+
+function convertPicture(component) {
+    var dataObj = component.data;
+    if (!dataObj) return '';
+    var lines = [];
+    var keys = Object.keys(dataObj);
+    keys.forEach(function(k) {
+        var item = dataObj[k];
+        if (item && item.imgurl) {
+            var imgUrl = item.imgurl;
+            if (imgUrl && !imgUrl.match(/^https?:\/\//)) {
+                imgUrl = config.site_url + '/attachment/' + imgUrl;
+            }
+            lines.push('![图片](' + imgUrl + ')');
+        }
+    });
+    return lines.join('\n');
+}
+
+function convertVideo(component) {
+    var params = component.params;
+    if (params && params.videourl) {
+        return '[视频](' + params.videourl + ')';
+    }
+    if (params && params.video) {
+        return '[视频](' + params.video + ')';
+    }
+    return '> [视频组件]';
+}
+
+function convertGoods(component) {
+    var dataObj = component.data;
+    if (!dataObj) return '> [商品组件]';
+    var lines = ['> **商品推荐：**'];
+    var keys = Object.keys(dataObj);
+    keys.forEach(function(k) {
+        var item = dataObj[k];
+        if (item) {
+            var title = item.title || item.goodstitle || '商品';
+            var price = item.price || item.goodsprice || '';
+            lines.push('> - ' + title + (price ? '（¥' + price + '）' : ''));
+        }
+    });
+    return lines.join('\n');
+}
+
+// 简易 HTML 转 Markdown
+function htmlToMarkdown(html) {
+    var text = html;
+    // 处理换行
+    text = text.replace(/<br\s*\/?>/gi, '\n');
+    text = text.replace(/<\/p>/gi, '\n\n');
+    text = text.replace(/<\/div>/gi, '\n');
+    // 标题
+    text = text.replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, function(_, c) { return '# ' + c.trim() + '\n'; });
+    text = text.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, function(_, c) { return '## ' + c.trim() + '\n'; });
+    text = text.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, function(_, c) { return '### ' + c.trim() + '\n'; });
+    text = text.replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, function(_, c) { return '#### ' + c.trim() + '\n'; });
+    text = text.replace(/<h5[^>]*>([\s\S]*?)<\/h5>/gi, function(_, c) { return '##### ' + c.trim() + '\n'; });
+    text = text.replace(/<h6[^>]*>([\s\S]*?)<\/h6>/gi, function(_, c) { return '###### ' + c.trim() + '\n'; });
+    // 粗体/斜体
+    text = text.replace(/<(strong|b)[^>]*>([\s\S]*?)<\/\1>/gi, function(_, t, c) { return '**' + c + '**'; });
+    text = text.replace(/<(em|i)[^>]*>([\s\S]*?)<\/\1>/gi, function(_, t, c) { return '*' + c + '*'; });
+    // 图片
+    text = text.replace(/<img[^>]*src=["']([^"']+)["'][^>]*>/gi, function(_, src) {
+        if (src && !src.match(/^https?:\/\//)) {
+            src = config.site_url + '/attachment/' + src;
+        }
+        return '![图片](' + src + ')';
+    });
+    // 链接
+    text = text.replace(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, function(_, href, t) {
+        return '[' + t.trim() + '](' + href + ')';
+    });
+    // 列表
+    text = text.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, function(_, c) { return '- ' + c.trim() + '\n'; });
+    // 去除剩余标签
+    text = text.replace(/<[^>]+>/g, '');
+    // 解码 HTML 实体
+    text = text.replace(/&nbsp;/g, ' ');
+    text = text.replace(/&amp;/g, '&');
+    text = text.replace(/&lt;/g, '<');
+    text = text.replace(/&gt;/g, '>');
+    text = text.replace(/&quot;/g, '"');
+    text = text.replace(/&#39;/g, "'");
+    // 清理多余空行
+    text = text.replace(/\n{3,}/g, '\n\n');
+    return text.trim();
 }
 
 function formatTime(ts) {
@@ -1047,9 +1215,16 @@ function parseBody(body) {
         if (imgMatch) {
             flushText();
             segments.push({ type: 'image', path: imgMatch[2], alt: imgMatch[1] });
-        } else {
-            textBuffer.push(line);
+            return;
         }
+        // 检查是否是视频行 [视频](url)
+        var videoMatch = line.trim().match(/^\[视频\]\(([^)]+)\)$/);
+        if (videoMatch) {
+            flushText();
+            segments.push({ type: 'video', url: videoMatch[1] });
+            return;
+        }
+        textBuffer.push(line);
     });
 
     flushText();
@@ -1127,6 +1302,20 @@ function buildPictureItem(imgUrl) {
             paddingtop: '0',
             paddingleft: '0',
             background: '#ffffff'
+        }
+    };
+}
+
+function buildVideoItem(videoUrl) {
+    return {
+        itemid: generateItemid(),
+        id: 'video',
+        params: {
+            videourl: videoUrl
+        },
+        style: {
+            background: '#ffffff',
+            padding: '10'
         }
     };
 }
